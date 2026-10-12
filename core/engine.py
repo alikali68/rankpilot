@@ -43,11 +43,15 @@ class RankPilotEngine:
         self.ua = USER_AGENTS.get(user_agent_key, USER_AGENTS["Desktop (Chrome 128)"])
         self.timeout = timeout
         self.session = requests.Session()
+        # NOTE: Do NOT set Accept-Encoding manually. When requests sees a
+        # user-supplied Accept-Encoding header, urllib3 skips automatic
+        # decompression and the engine ends up scoring raw gzip/brotli bytes
+        # instead of HTML. Let requests send its default (gzip, deflate) and
+        # decode transparently.
         self.session.headers.update({
             "User-Agent": self.ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.7",
-            "Accept-Encoding": "gzip, deflate, br",
         })
 
     @staticmethod
