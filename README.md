@@ -17,6 +17,7 @@
 | Feature | Details |
 |---------|---------|
 | 🔍 7-category audit | Meta, headings, images, links, performance, security, content — 25 checks |
+| 🌐 Multi-page site audit | Sitemap-driven crawl — aggregate score, category averages, weakest pages |
 | 💯 Deterministic scoring | 0–100 with transparent weights — no black boxes |
 | ⚡ Concurrent crawler | `ThreadPoolExecutor` — link & image probes run in parallel |
 | 📱 Device profiles | Desktop Chrome 128 · Mobile iPhone Safari · Googlebot |
@@ -87,8 +88,9 @@ rankpilot/
 ├── app.py              → Streamlit Enterprise dashboard (UI, charts, exports)
 ├── core/
 │   ├── __init__.py
-│   ├── models.py       → AuditCheck / AuditReport dataclasses
-│   └── engine.py       → RankPilotEngine: fetch, audit, scoring
+│   ├── models.py       → AuditCheck / AuditReport / SiteAuditReport dataclasses
+│   ├── engine.py       → RankPilotEngine: fetch, audit, scoring, site crawl
+│   └── sitemap.py      → deterministic /sitemap.xml discovery
 ├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yml
@@ -97,12 +99,45 @@ rankpilot/
 ```python
 from core.engine import RankPilotEngine
 
+# Single page
 report = RankPilotEngine().inspect_url("https://example.com")
 print(report.total_score, report.letter_grade)   # 70.5 C
+
+# Full site — crawls up to 25 pages via /sitemap.xml
+site = RankPilotEngine().audit_site("https://example.com", max_pages=25)
+print(site.avg_score, site.grade, site.page_count)
 ```
 
 **Data flow:** `URL → RankPilotEngine.inspect_url() → AuditReport → dashboard / PDF / JSON`.
 The `AuditReport` dataclass is the single source of truth — the dashboard, the PDF generator, and the JSON exporter all derive from it.
+
+---
+
+## 🌐 Module M1 — Multi-page site audit: the science
+
+A single-page score tells you how one URL performs. A *site* score tells you how the whole property performs — and, more importantly, *where it bleeds*. Module M1 extends the deterministic engine from one URL to an entire sitemap without changing any scoring rule: every page is audited by the exact same 25-check pipeline, so per-page scores stay directly comparable.
+
+### 1. 🗺️ Sitemap discovery (`core/sitemap.py`)
+The crawler fetches `/sitemap.xml` and parses it as XML (with a regex fallback for malformed feeds). Sitemap **index** files are followed recursively — child sitemaps are queued and crawled breadth-first. Every discovered URL is normalized and filtered to the **same registrable domain** (subdomains and off-site URLs are dropped), deduplicated, and capped at `max_pages` (default 25). If no sitemap exists or it can't be parsed, the audit degrades gracefully to the base URL alone — the run never fails, it narrows.
+
+### 2. 🤝 Polite concurrent crawling
+Pages are dispatched to a `ThreadPoolExecutor` with **5 workers** and a **0.3 s stagger between dispatches** — fast enough to finish a 25-page site in about a minute, polite enough not to hammer the target server. Each page runs the full `inspect_url()` pipeline independently. A page that times out or errors records a **zero-score report** (`status_code=0`) and the crawl continues — one bad page never aborts the site audit. Results are re-ordered deterministically to match sitemap order, so repeated runs produce identical tables.
+
+### 3. 📐 Aggregation statistics (`SiteAuditReport`)
+Raw per-page scores are rolled up with transparent, textbook statistics — no hidden weighting:
+
+| Metric | Definition | Why it matters |
+|--------|-----------|----------------|
+| **Average score** | Arithmetic mean of page scores | The headline site grade |
+| **Median score** | Middle value of sorted page scores | Robust against one terrible outlier page dragging the mean |
+| **Category averages** | Mean of each category's % across pages | Shows *systemic* weaknesses (e.g. every page fails Images) vs isolated ones |
+| **Weakest pages** | Bottom 5 pages by score | The prioritized fix-list — where remediation effort pays off first |
+
+The site grade reuses the identical A–F scale as single-page audits, so a site's `72.4/C` means exactly what a page's `72.4/C` means.
+
+### When to use which mode
+- **Single page** — deep-dive on one URL: full 25-check matrix, radar chart, per-check action plan.
+- **Full site** — triage across the property: aggregate health, category-wide patterns, weakest-page ranking, one-page executive PDF for stakeholders.
 
 ---
 
@@ -150,9 +185,9 @@ connect the repo and set `app.py` as the entry point.
 
 ## 🔮 Roadmap
 
+- [x] Sitemap-aware multi-page crawl (Module M1 — shipped)
 - [ ] Core Web Vitals via PageSpeed API (optional key)
 - [ ] Historical tracking — re-audit and diff scores over time
-- [ ] Sitemap-aware multi-page crawl
 - [ ] Scheduled audits with email digests
 
 ---
