@@ -6,6 +6,7 @@ High-concurrency technical crawler & validator.
 from __future__ import annotations
 
 import re
+import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -15,7 +16,8 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from core.models import AuditCheck, AuditReport
+from core.models import AuditCheck, AuditReport, SiteAuditReport
+from core.sitemap import fetch_sitemap_urls
 
 GENERIC_ANCHOR_SET = {
     "click here", "click", "read more", "learn more",
@@ -582,4 +584,73 @@ class RankPilotEngine:
                 "encoding": encoding or "None",
             },
             timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        )
+
+    def audit_site(self, base_url: str, max_pages: int = 25) -> SiteAuditReport:
+        """Multi-page site audit via /sitemap.xml discovery.
+
+        Runs the existing inspect_url() concurrently (5 workers, 0.3s polite
+        dispatch delay). A failed page records a zero-score report and never
+        aborts the crawl. Page order is deterministic (sitemap order).
+        """
+        target_urls = fetch_sitemap_urls(base_url, max_pages=max_pages)
+        if not target_urls:
+            target_urls = [base_url]
+
+        def _zero_report(url: str, err: str) -> AuditReport:
+            return AuditReport(
+                target_url=url,
+                final_url=url,
+                status_code=0,
+                response_time=0.0,
+                total_score=0.0,
+                letter_grade="F",
+                category_scores={},
+                checks=[],
+                metrics={},
+                timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            )
+
+        reports_by_url: Dict[str, AuditReport] = {}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            future_to_url = {}
+            for idx, page_url in enumerate(target_urls):
+                if idx > 0:
+                    time.sleep(0.3)
+                future_to_url[pool.submit(self.inspect_url, page_url)] = page_url
+            for future in as_completed(future_to_url):
+                page_url = future_to_url[future]
+                try:
+                    reports_by_url[page_url] = future.result()
+                except Exception as exc:
+                    reports_by_url[page_url] = _zero_report(page_url, str(exc))
+
+        page_reports: List[AuditReport] = [
+            reports_by_url.get(u) or _zero_report(u, "missing result")
+            for u in target_urls
+        ]
+
+        scores = [p.total_score for p in page_reports]
+        avg_score = round(statistics.mean(scores), 1) if scores else 0.0
+        median_score = round(statistics.median(scores), 1) if scores else 0.0
+
+        cat_accum: Dict[str, List[float]] = {}
+        for p in page_reports:
+            for c_name, c_data in p.category_scores.items():
+                cat_accum.setdefault(c_name, []).append(float(c_data.get("pct", 0.0)))
+        category_avgs = {
+            c: round(statistics.mean(v), 1) for c, v in cat_accum.items() if v
+        }
+
+        weakest = sorted(page_reports, key=lambda p: (p.total_score, p.target_url))[:5]
+
+        return SiteAuditReport(
+            base_url=base_url,
+            page_reports=page_reports,
+            page_count=len(page_reports),
+            avg_score=avg_score,
+            median_score=median_score,
+            category_avgs=category_avgs,
+            weakest_pages=[(p.target_url, p.total_score) for p in weakest],
+            grade=self._calc_grade(avg_score),
         )
