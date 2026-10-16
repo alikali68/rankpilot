@@ -164,6 +164,22 @@ A capped two-page executive PDF: score summary, category deltas, and the ranked 
 
 ---
 
+## 🕰️ Project evolution — from first audit to competitive intelligence
+
+RankPilot was built incrementally, one verified module at a time. Every stage kept the same contract: **deterministic scoring, no silent behavior changes, no black boxes.**
+
+**v1.0 — The engine (Oct 10, 2026).** It started as a single-page technical auditor: a persistent-session fetcher, one BeautifulSoup parse shared by all suites, and 25 weighted checks across 7 categories producing a 0–100 score and an A–F grade. The founding bet was *measurement over guessing* — the same URL must produce the same score on every run. Shipped with a dark Streamlit dashboard, Plotly radar analytics, a priority action plan, one-click PDF/JSON export, Docker support, and a live demo.
+
+**v1.1 — Reliability & correctness (Oct 11–12).** Real-world crawling exposed two flaws, both fixed transparently: a manual `Accept-Encoding` header was breaking decompression and deflating scores (removed — true scores restored), and slow hosts needed a 30 s timeout with retry. No scoring rule changed; the numbers just became honest.
+
+**v2.0 — Module M1: full-site audits (Oct 13).** One page tells you how a URL performs; a *site* score tells you where the property bleeds. Added deterministic sitemap discovery (index files followed recursively, same-domain filtering, capped pages), polite concurrent crawling (5 workers, staggered dispatch), and transparent aggregation — mean, median, category averages, weakest-5 pages — on the identical A–F scale. Failed pages record zeros instead of aborting the run.
+
+**v2.1 — Module M2: competitor comparison (Oct 16).** The current release. Two sites audited through the identical pipeline, normalized per-check to 0–100, with score/category deltas, win/lose/tie verdicts, and a ranked opportunity list — the smallest set of fixes that closes the competitive gap fastest. Failed pages count as zero everywhere, so deltas can never flatter.
+
+Full version-by-version detail lives in [CHANGELOG.md](CHANGELOG.md).
+
+---
+
 ## ⚡ Performance
 
 | Technique | Effect |
