@@ -138,6 +138,29 @@ The site grade reuses the identical A–F scale as single-page audits, so a site
 ### When to use which mode
 - **Single page** — deep-dive on one URL: full 25-check matrix, radar chart, per-check action plan.
 - **Full site** — triage across the property: aggregate health, category-wide patterns, weakest-page ranking, one-page executive PDF for stakeholders.
+- **Compare** — benchmark against a competitor: side-by-side audits, score deltas, and a prioritized fix-list.
+
+---
+
+## 🆚 Module M2 — Competitor comparison: the science
+
+Knowing your own score is half the picture. Module M2 audits two sites with the **identical deterministic pipeline** — same 25 checks, same weights, same thresholds — so every delta is apples-to-apples, never an artifact of different scoring.
+
+### 1. 🔬 Per-check normalization (`core/compare.py`)
+Each check earns raw points against its own weight (2–8 pts), so cross-site comparison normalizes every check to a 0–100 scale: `(avg_earned / maximum) × 100`. Pages that failed to crawl contribute **0** to check averages — exactly as they contribute 0 to the headline site average — so the comparison table can never look rosier than the site score it summarizes.
+
+### 2. 📊 Deltas, not just scores
+- **Score deltas** (average and median): positive means you lead, negative means you trail.
+- **Category deltas**: per-category percentage-point gaps, charted as diverging bars.
+- **Check table**: every check side-by-side with win / lose / tie verdicts (tie = gap under 2 points, the noise floor).
+
+### 3. 🎯 Priority opportunities
+The money output: checks where the competitor scores pass/warn and you fail, ranked by gap size. This is the ordered fix-list — the smallest set of changes that closes the competitive distance fastest. Failed competitor crawls never abort your audit; they surface a clear, human-readable warning instead.
+
+### 4. 📄 Comparison PDF
+A capped two-page executive PDF: score summary, category deltas, and the ranked opportunity list with per-check recommendations.
+
+**Data flow:** `URL × 2 → audit_site() × 2 → compare_reports() → ComparisonReport → dashboard / PDF`. The `ComparisonReport` dataclass is the single source of truth — pure computation, zero network I/O, fully deterministic.
 
 ---
 

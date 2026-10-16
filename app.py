@@ -17,6 +17,8 @@ from reportlab.pdfgen import canvas
 
 from core.engine import RankPilotEngine, USER_AGENTS
 from core.models import AuditReport, SiteAuditReport
+from typing import Any
+from core.compare import ComparisonReport, compare_reports
 
 st.set_page_config(
     page_title="RankPilot — Technical SEO Auditor",
@@ -143,20 +145,172 @@ def generate_site_pdf(site_report: SiteAuditReport) -> bytes:
     return buffer.getvalue()
 
 
+def generate_comparison_pdf(comp: ComparisonReport) -> bytes:
+    """Generates a clean executive PDF (capped at 2 pages) for competitive comparison."""
+    buffer = io.BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    page_num = 1
+
+    p.setFont("Helvetica-Bold", 18)
+    p.drawString(50, 750, _pdf_safe("RankPilot Competitive SEO Comparison"))
+    p.setFont("Helvetica", 10)
+    p.drawString(
+        50,
+        734,
+        _pdf_safe(f"Your Site: {comp.mine_url} ({comp.mine_pages} pages)  vs.  Competitor: {comp.rival_url} ({comp.rival_pages} pages)"),
+    )
+    p.line(50, 724, 560, 724)
+
+    y = 700
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, y, "Executive Score Summary:")
+    y -= 18
+
+    p.setFont("Helvetica", 10)
+    sign_avg = "+" if comp.score_delta_avg > 0 else ""
+    sign_med = "+" if comp.score_delta_median > 0 else ""
+    p.drawString(
+        60,
+        y,
+        _pdf_safe(
+            f"Average Score:  You {comp.mine_avg:.1f}/100 (Grade {comp.mine_grade})  |  "
+            f"Competitor {comp.rival_avg:.1f}/100 (Grade {comp.rival_grade})  |  "
+            f"Delta: {sign_avg}{comp.score_delta_avg:.1f}"
+        ),
+    )
+    y -= 16
+    p.drawString(
+        60,
+        y,
+        _pdf_safe(
+            f"Median Score:   You {comp.mine_median:.1f}/100  |  "
+            f"Competitor {comp.rival_median:.1f}/100  |  "
+            f"Delta: {sign_med}{comp.score_delta_median:.1f}"
+        ),
+    )
+    y -= 16
+    p.drawString(
+        60,
+        y,
+        _pdf_safe(f"Pages Behind Competitor Average: {comp.pages_behind} of {comp.mine_pages} audited pages"),
+    )
+
+    y -= 26
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, y, "Category Delta Breakdown (Your % vs. Competitor %):")
+    y -= 18
+
+    p.setFont("Helvetica", 10)
+    for cat, delta in comp.category_deltas.items():
+        d_sign = "+" if delta > 0 else ""
+        p.drawString(60, y, _pdf_safe(f"- {cat}: {d_sign}{delta:.1f}%"))
+        y -= 15
+
+    y -= 14
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, y, "Priority Opportunities (Competitor Passed/Warned, You Failed):")
+    y -= 18
+
+    if not comp.opportunities:
+        p.setFont("Helvetica", 10)
+        p.drawString(60, y, "No critical competitive gaps detected.")
+    else:
+        p.setFont("Helvetica", 9)
+        for idx, opp in enumerate(comp.opportunities, 1):
+            if y < 75:
+                if page_num >= 2:
+                    break
+                p.showPage()
+                page_num += 1
+                y = 750
+                p.setFont("Helvetica-Bold", 12)
+                p.drawString(50, y, "Priority Opportunities (Continued):")
+                y -= 20
+                p.setFont("Helvetica", 9)
+
+            p.drawString(
+                60,
+                y,
+                _pdf_safe(
+                    f"{idx}. {opp['name']} ({opp['category']}) — "
+                    f"You: {opp['mine_score']:.1f}% [{opp['mine_status'].upper()}] vs "
+                    f"Rival: {opp['rival_score']:.1f}% [{opp['rival_status'].upper()}] "
+                    f"(Delta: {opp['delta']:.1f})"
+                ),
+            )
+            y -= 13
+            p.drawString(75, y, _pdf_safe(f"Fix: {opp['recommendation'][:95]}"))
+            y -= 16
+
+    p.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def _run_site_audit_with_progress(
+    engine: RankPilotEngine,
+    base_url: str,
+    max_pages: int,
+    stage_prefix: str,
+    progress_bar: Any,
+    frac_start: float = 0.0,
+    frac_end: float = 1.0,
+) -> SiteAuditReport:
+    """
+    Runs a sequential site audit with honest staged progress updates.
+    The sitemap is discovered once, inside audit_site(); no fake per-page loop.
+    """
+    raw_url = base_url.strip()
+    if not raw_url:
+        raise ValueError("URL cannot be empty.")
+
+    probe_resp, probe_err = engine.fetch(raw_url)
+    if probe_err or probe_resp is None:
+        raise RuntimeError(probe_err or f"Could not reach {raw_url}.")
+
+    span = frac_end - frac_start
+    progress_bar.progress(
+        frac_start + 0.05 * span,
+        text=f"{stage_prefix} crawling up to {max_pages} pages...",
+    )
+    site_rep = engine.audit_site(raw_url, max_pages=max_pages)
+    valid_pages = [p for p in site_rep.page_reports if p.status_code > 0 and p.checks]
+    if not valid_pages:
+        raise RuntimeError(
+            f"All {site_rep.page_count} discovered page(s) on '{raw_url}' failed validation or blocked the crawler."
+        )
+    progress_bar.progress(frac_end, text=f"{stage_prefix} done.")
+    return site_rep
+
+
 # Sidebar Navigation
 with st.sidebar:
     st.title("⚡ RankPilot Enterprise")
     st.caption("Engine v2.0 • Concurrent crawler")
 
-    audit_mode = st.radio("Audit Mode", ["Single page", "Full site"], horizontal=True)
+    audit_mode = st.radio("Audit Mode", ["Single page", "Full site", "Compare"], horizontal=True)
 
-    input_url = st.text_input("Enter Target Domain / URL", value="https://example.com")
+    if audit_mode == "Compare":
+        input_url = st.text_input("Your site", value="https://example.com")
+        rival_url = st.text_input("Competitor", value="https://www.iana.org")
+    else:
+        input_url = st.text_input("Enter Target Domain / URL", value="https://example.com")
+        rival_url = ""
+
     max_pages = 25
-    if audit_mode == "Full site":
+    if audit_mode in ("Full site", "Compare"):
         max_pages = st.slider("Max pages (via /sitemap.xml)", min_value=5, max_value=50, value=25, step=5)
     device_profile = st.selectbox("Inspection User-Agent", list(USER_AGENTS.keys()))
+
+    if audit_mode == "Compare":
+        btn_label = "🚀 Run Comparison"
+    elif audit_mode == "Full site":
+        btn_label = "🚀 Run Site Audit"
+    else:
+        btn_label = "🚀 Run Technical Audit"
+
     run_btn = st.button(
-        "🚀 Run Site Audit" if audit_mode == "Full site" else "🚀 Run Technical Audit",
+        btn_label,
         type="primary",
         use_container_width=True,
     )
@@ -178,20 +332,59 @@ with st.sidebar:
 # Execution Handler
 if run_btn:
     engine = RankPilotEngine(user_agent_key=device_profile)
-    if audit_mode == "Full site":
-        label = f"Crawling sitemap and auditing up to {max_pages} pages for {input_url}..."
-    else:
-        label = f"Crawling and validating technical parameters for {input_url}..."
-    with st.spinner(label):
+    if audit_mode == "Compare":
+        prog = st.progress(0.0, text="Initializing comparison audit...")
+        mine_rep: SiteAuditReport | None = None
+        rival_rep: SiteAuditReport | None = None
+
         try:
-            if audit_mode == "Full site":
-                st.session_state["active_site_report"] = engine.audit_site(input_url, max_pages=max_pages)
-                st.session_state.pop("active_report", None)
-            else:
-                st.session_state["active_report"] = engine.inspect_url(input_url)
-                st.session_state.pop("active_site_report", None)
+            mine_rep = _run_site_audit_with_progress(
+                engine, input_url, max_pages, "Auditing your site…", prog, 0.0, 0.45
+            )
         except Exception as err:
-            st.error(f"Audit aborted due to critical error: {err}")
+            prog.empty()
+            st.error(
+                f"Could not complete the audit for your site ({input_url}): {err} "
+                "Please verify the URL and try again."
+            )
+
+        if mine_rep is not None:
+            try:
+                rival_rep = _run_site_audit_with_progress(
+                    engine, rival_url, max_pages, "Auditing competitor…", prog, 0.5, 0.95
+                )
+            except Exception as err:
+                prog.empty()
+                st.warning(
+                    f"We could not crawl the competitor site ({rival_url}). "
+                    f"Reason: {err} "
+                    "The site may be blocking automated requests, timing out, or missing a reachable landing page. "
+                    "Please try a different competitor URL."
+                )
+
+        if mine_rep is not None and rival_rep is not None:
+            prog.progress(1.0, text="Computing competitive comparison...")
+            st.session_state["active_comparison"] = compare_reports(mine_rep, rival_rep)
+            st.session_state.pop("active_report", None)
+            st.session_state.pop("active_site_report", None)
+            prog.empty()
+    else:
+        if audit_mode == "Full site":
+            label = f"Crawling sitemap and auditing up to {max_pages} pages for {input_url}..."
+        else:
+            label = f"Crawling and validating technical parameters for {input_url}..."
+        with st.spinner(label):
+            try:
+                if audit_mode == "Full site":
+                    st.session_state["active_site_report"] = engine.audit_site(input_url, max_pages=max_pages)
+                    st.session_state.pop("active_report", None)
+                    st.session_state.pop("active_comparison", None)
+                else:
+                    st.session_state["active_report"] = engine.inspect_url(input_url)
+                    st.session_state.pop("active_site_report", None)
+                    st.session_state.pop("active_comparison", None)
+            except Exception as err:
+                st.error(f"Audit aborted due to critical error: {err}")
 
 # Dashboard Presentation
 if audit_mode == "Single page" and "active_report" in st.session_state:
@@ -426,3 +619,171 @@ if audit_mode == "Full site" and "active_site_report" in st.session_state:
             file_name=f"site_audit_{urlparse(srep.base_url).netloc}.json",
             mime="application/json",
         )
+
+# Compare Mode Dashboard Presentation
+if audit_mode == "Compare" and "active_comparison" in st.session_state:
+    comp: ComparisonReport = st.session_state["active_comparison"]
+
+    col_t1, col_t2 = st.columns([3, 1])
+    with col_t1:
+        st.subheader(f"Comparison: `{comp.mine_url}` vs `{comp.rival_url}`")
+        st.caption(
+            f"Your pages audited: {comp.mine_pages} • Competitor pages audited: {comp.rival_pages} • "
+            f"Your pages below competitor average: {comp.pages_behind}"
+        )
+    with col_t2:
+        mine_host = urlparse(comp.mine_url).netloc or "yoursite"
+        rival_host = urlparse(comp.rival_url).netloc or "competitor"
+        st.download_button(
+            label="📄 Download comparison PDF",
+            data=generate_comparison_pdf(comp),
+            file_name=f"RankPilot_compare_{mine_host}_vs_{rival_host}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+
+    # 1. Side-by-side Score Cards
+    sc1, sc2, sc3 = st.columns([1.2, 1.2, 1.2])
+
+    with sc1:
+        st.markdown(
+            f"""
+            <div class="metric-container">
+                <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Your Site Average</div>
+                <div class="score-grade grade-{comp.mine_grade}">{comp.mine_avg:.1f}</div>
+                <div style="font-weight: 700; font-size: 1.05rem;">GRADE: {comp.mine_grade} • Median: {comp.mine_median:.1f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with sc2:
+        st.markdown(
+            f"""
+            <div class="metric-container">
+                <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Competitor Average</div>
+                <div class="score-grade grade-{comp.rival_grade}">{comp.rival_avg:.1f}</div>
+                <div style="font-weight: 700; font-size: 1.05rem;">GRADE: {comp.rival_grade} • Median: {comp.rival_median:.1f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with sc3:
+        delta_color = "#10b981" if comp.score_delta_avg > 0 else ("#ef4444" if comp.score_delta_avg < 0 else "#9ca3af")
+        avg_prefix = "+" if comp.score_delta_avg > 0 else ""
+        med_prefix = "+" if comp.score_delta_median > 0 else ""
+        st.markdown(
+            f"""
+            <div class="metric-container">
+                <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Score Delta (You vs Rival)</div>
+                <div class="score-grade" style="color: {delta_color};">{avg_prefix}{comp.score_delta_avg:.1f}</div>
+                <div style="font-weight: 700; font-size: 1.05rem; color: #d1d5db;">
+                    Median Delta: {med_prefix}{comp.score_delta_median:.1f} • Pages Behind: {comp.pages_behind}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    # 2. Category Delta Bar Chart
+    st.markdown("### 📊 Category Performance Deltas (Your % − Competitor %)")
+    cat_names = list(comp.category_deltas.keys())
+    cat_vals = [comp.category_deltas[c] for c in cat_names]
+    bar_colors = ["#10b981" if v >= 0 else "#ef4444" for v in cat_vals]
+
+    fig_delta = go.Figure(
+        go.Bar(
+            x=cat_names,
+            y=cat_vals,
+            marker_color=bar_colors,
+            text=[f"{'+' if v > 0 else ''}{v:.1f}%" for v in cat_vals],
+            textposition="outside",
+        )
+    )
+    fig_delta.update_layout(
+        yaxis_title="Score Delta (%)",
+        xaxis_title="Category",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#f3f4f6"),
+        margin=dict(l=30, r=30, t=30, b=30),
+        yaxis=dict(zeroline=True, zerolinewidth=1.5, zerolinecolor="#6b7280"),
+    )
+    st.plotly_chart(fig_delta, use_container_width=True)
+
+    st.markdown("---")
+
+    # 3. Check-by-Check Comparison Table & 4. Opportunities
+    tab_opp, tab_checks = st.tabs([
+        "🎯 Priority Opportunities (Fix First)",
+        "📑 Full Check Comparison Table",
+    ])
+
+    with tab_opp:
+        st.subheader("Fix These First: Competitor Passed/Warned Where You Failed")
+        if not comp.opportunities:
+            st.success("You have no checks where you failed while the competitor passed or warned.")
+        else:
+            for rank, opp in enumerate(comp.opportunities, 1):
+                st.markdown(
+                    f"""
+                    <div style="border-left: 4px solid #ef4444; padding-left: 14px; margin-bottom: 12px; background: #111827; padding-top: 10px; padding-bottom: 10px; border-radius: 0 8px 8px 0;">
+                        <span style="font-weight: 800; color: #ef4444;">#{rank} [GAP: -{opp['gap']:.1f} pts]</span>
+                        <strong style="font-size: 1.05rem;"> {opp['name']}</strong>
+                        <span style="color: #9ca3af; font-size: 0.85rem;"> ({opp['category']})</span>
+                        <div style="margin-top: 4px; color: #e5e7eb;">
+                            Your Score: <strong>{opp['mine_score']:.1f}%</strong> ({opp['mine_status'].upper()}) &nbsp;|&nbsp;
+                            Competitor Score: <strong>{opp['rival_score']:.1f}%</strong> ({opp['rival_status'].upper()}) &nbsp;|&nbsp;
+                            Delta: <strong style="color: #ef4444;">{opp['delta']:.1f}</strong>
+                        </div>
+                        <div style="margin-top: 4px; color: #60a5fa; font-weight: 500;">👉 {opp['recommendation']}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    with tab_checks:
+        sort_col1, sort_col2 = st.columns([2, 2])
+        with sort_col1:
+            sort_order = st.selectbox(
+                "Sort checks by Delta",
+                ["Largest Deficit First (Ascending)", "Largest Lead First (Descending)", "Default Check Order"],
+            )
+
+        rows_chk = [
+            {
+                "Check": name,
+                "Your Score": m_sc,
+                "Competitor Score": r_sc,
+                "Delta": d_sc,
+                "Status": st_label,
+            }
+            for (name, m_sc, r_sc, d_sc, st_label) in comp.check_table
+        ]
+        df_checks = pd.DataFrame(rows_chk)
+
+        if not df_checks.empty:
+            if sort_order == "Largest Deficit First (Ascending)":
+                df_checks = df_checks.sort_values(by="Delta", ascending=True)
+            elif sort_order == "Largest Lead First (Descending)":
+                df_checks = df_checks.sort_values(by="Delta", ascending=False)
+
+            def _style_status_row(row: pd.Series) -> list[str]:
+                status = row["Status"]
+                if status == "win":
+                    bg = "background-color: rgba(16, 185, 129, 0.18); color: #10b981;"
+                elif status == "lose":
+                    bg = "background-color: rgba(239, 68, 68, 0.18); color: #ef4444;"
+                else:
+                    bg = "background-color: rgba(156, 163, 175, 0.12); color: #d1d5db;"
+                return [bg] * len(row)
+
+            styled_df = df_checks.style.apply(_style_status_row, axis=1).format({
+                "Your Score": "{:.1f}",
+                "Competitor Score": "{:.1f}",
+                "Delta": "{:+.1f}",
+            })
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
