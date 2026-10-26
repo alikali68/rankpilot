@@ -19,6 +19,7 @@ from core.engine import RankPilotEngine, USER_AGENTS
 from core.models import AuditReport, SiteAuditReport
 from typing import Any
 from core.compare import ComparisonReport, compare_reports
+from core.cwv import CWVError, CWVResult, run_cwv
 
 st.set_page_config(
     page_title="RankPilot — Technical SEO Auditor",
@@ -66,7 +67,7 @@ def _pdf_safe(text: str) -> str:
     return str(text).encode("latin-1", errors="replace").decode("latin-1")
 
 
-def generate_pdf(report: AuditReport) -> bytes:
+def generate_pdf(report: AuditReport, cwv: CWVResult | None = None) -> bytes:
     buffer = io.BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
     p.setFont("Helvetica-Bold", 18)
@@ -76,6 +77,42 @@ def generate_pdf(report: AuditReport) -> bytes:
 
     p.line(50, 725, 560, 725)
     y = 700
+
+    if cwv is not None:
+        p.setFont("Helvetica-Bold", 12)
+        p.drawString(50, y, "Core Web Vitals (Mobile — PageSpeed Insights):")
+        y -= 20
+        p.setFont("Helvetica", 10)
+        for mid in ("lcp", "inp", "cls"):
+            m = cwv.metrics[mid]
+            verdict_txt = (m.verdict or "not measured").replace("-", " ").upper()
+            field_txt = (
+                f"real-user p75: {m.field_percentile:.0f}{m.unit} ({m.field_category})"
+                if m.field_percentile is not None
+                else "real-user: not enough data"
+            )
+            lab_txt = (
+                f"lab: {m.lab_display}" if m.lab_display is not None
+                else "lab: not measured"
+            )
+            p.drawString(60, y, _pdf_safe(f"- {m.label}: {verdict_txt} | {field_txt} | {lab_txt}"))
+            y -= 16
+        if not cwv.field_available:
+            p.drawString(60, y, _pdf_safe("Note: no real-user (CrUX) data for this URL yet — lab values only."))
+            y -= 16
+        if cwv.opportunities:
+            p.drawString(60, y, _pdf_safe("Top opportunities:"))
+            y -= 16
+            p.setFont("Helvetica", 9)
+            for opp in cwv.opportunities:
+                if y < 60:
+                    p.showPage()
+                    y = 750
+                save_s = opp["savings_ms"] / 1000.0
+                p.drawString(70, y, _pdf_safe(f"- {opp['title']} — saves ~{save_s:.1f}s"))
+                y -= 13
+            p.setFont("Helvetica", 10)
+        y -= 10
 
     p.setFont("Helvetica-Bold", 12)
     p.drawString(50, y, "Category Performance Breakdown:")
@@ -286,7 +323,7 @@ def _run_site_audit_with_progress(
 # Sidebar Navigation
 with st.sidebar:
     st.title("⚡ RankPilot Enterprise")
-    st.caption("Engine v2.0 • Concurrent crawler")
+    st.caption("Engine v2.2 • Core Web Vitals (M3)")
 
     audit_mode = st.radio("Audit Mode", ["Single page", "Full site", "Compare"], horizontal=True)
 
@@ -301,6 +338,22 @@ with st.sidebar:
     if audit_mode in ("Full site", "Compare"):
         max_pages = st.slider("Max pages (via /sitemap.xml)", min_value=5, max_value=50, value=25, step=5)
     device_profile = st.selectbox("Inspection User-Agent", list(USER_AGENTS.keys()))
+
+    st.markdown("---")
+    st.markdown("### ⚡ Core Web Vitals")
+    _secret_key = ""
+    try:
+        _secret_key = st.secrets.get("PAGESPEED_API_KEY", "") or ""
+    except Exception:
+        _secret_key = ""
+    pagespeed_key = st.text_input(
+        "PageSpeed API key",
+        value=_secret_key,
+        type="password",
+        help="Free key from Google Cloud (PageSpeed Insights API). "
+        "Set it in Streamlit secrets as PAGESPEED_API_KEY, or paste it here "
+        "for this session only. It is never saved in the repo.",
+    )
 
     if audit_mode == "Compare":
         btn_label = "🚀 Run Comparison"
@@ -367,6 +420,8 @@ if run_btn:
             st.session_state["active_comparison"] = compare_reports(mine_rep, rival_rep)
             st.session_state.pop("active_report", None)
             st.session_state.pop("active_site_report", None)
+            st.session_state.pop("active_cwv", None)
+            st.session_state.pop("active_cwv_url", None)
             prog.empty()
     else:
         if audit_mode == "Full site":
@@ -379,10 +434,14 @@ if run_btn:
                     st.session_state["active_site_report"] = engine.audit_site(input_url, max_pages=max_pages)
                     st.session_state.pop("active_report", None)
                     st.session_state.pop("active_comparison", None)
+                    st.session_state.pop("active_cwv", None)
+                    st.session_state.pop("active_cwv_url", None)
                 else:
                     st.session_state["active_report"] = engine.inspect_url(input_url)
                     st.session_state.pop("active_site_report", None)
                     st.session_state.pop("active_comparison", None)
+                    st.session_state.pop("active_cwv", None)
+                    st.session_state.pop("active_cwv_url", None)
             except Exception as err:
                 st.error(f"Audit aborted due to critical error: {err}")
 
@@ -396,7 +455,10 @@ if audit_mode == "Single page" and "active_report" in st.session_state:
         st.subheader(f"Results for: `{rep.final_url}`")
         st.caption(f"Status: HTTP {rep.status_code} • Scan Duration: {rep.response_time}s • Timestamp: {rep.timestamp}")
     with col_t2:
-        pdf_bytes = generate_pdf(rep)
+        _cwv = st.session_state.get("active_cwv")
+        if st.session_state.get("active_cwv_url") != rep.final_url:
+            _cwv = None
+        pdf_bytes = generate_pdf(rep, cwv=_cwv)
         st.download_button(
             label="📄 Download PDF Audit",
             data=pdf_bytes,
@@ -436,11 +498,12 @@ if audit_mode == "Single page" and "active_report" in st.session_state:
     st.markdown("---")
 
     # Tabs
-    tab_overview, tab_matrix, tab_issues, tab_json = st.tabs([
+    tab_overview, tab_matrix, tab_issues, tab_json, tab_cwv = st.tabs([
         "📊 Category Radar & Analytics",
         "📑 Comprehensive Matrix",
         "🚨 Prioritized Action Items",
         "💾 Export Data (JSON)",
+        "⚡ Core Web Vitals",
     ])
 
     # Tab 1: Category Radar
@@ -518,6 +581,7 @@ if audit_mode == "Single page" and "active_report" in st.session_state:
             "grade": rep.letter_grade,
             "categories": rep.category_scores,
             "metrics": rep.metrics,
+            "core_web_vitals": _cwv.to_dict() if _cwv else None,
             "checks": [
                 {
                     "name": c.name,
@@ -538,6 +602,95 @@ if audit_mode == "Single page" and "active_report" in st.session_state:
             file_name=f"audit_{urlparse(rep.final_url).netloc}.json",
             mime="application/json",
         )
+
+    # Tab 5: Core Web Vitals (mobile-first, PageSpeed Insights)
+    with tab_cwv:
+        st.markdown("### ⚡ Core Web Vitals — Mobile")
+        st.caption(
+            "Real-user experience from Google PageSpeed Insights. Each metric "
+            "is judged on its own against Google's thresholds — there is no "
+            "single combined score. Field data comes from real Chrome users "
+            "(CrUX); lab data is the Lighthouse measurement for this run."
+        )
+        if not pagespeed_key:
+            st.info(
+                "No API key set — this run will use Google's anonymous quota, "
+                "which is much lower. For reliable results, paste your free "
+                "PageSpeed Insights API key in the sidebar, or set it in "
+                "Streamlit secrets as PAGESPEED_API_KEY."
+            )
+        if st.button("🚀 Run Core Web Vitals (mobile)", type="primary"):
+            with st.spinner("Measuring with PageSpeed Insights (usually 10–30 s)…"):
+                try:
+                    _result = run_cwv(rep.final_url, api_key=pagespeed_key or None)
+                except CWVError as err:
+                    st.error(str(err))
+                else:
+                    st.session_state["active_cwv"] = _result
+                    st.session_state["active_cwv_url"] = rep.final_url
+                    st.rerun()
+
+        _cwv = st.session_state.get("active_cwv")
+        if st.session_state.get("active_cwv_url") != rep.final_url:
+            _cwv = None
+        if _cwv is not None:
+            st.caption(
+                f"Strategy: Mobile • Fetched: {_cwv.fetched_at} • "
+                f"Lab performance score: "
+                f"{_cwv.performance_score * 100:.0f}/100"
+                if _cwv.performance_score is not None
+                else f"Strategy: Mobile • Fetched: {_cwv.fetched_at}"
+            )
+            if not _cwv.field_available:
+                st.warning(
+                    "Not enough real-user (CrUX) data for this URL yet — "
+                    "showing lab measurements only. Popular pages accumulate "
+                    "field data over time."
+                )
+            _verdict_color = {
+                "good": "#10b981",
+                "needs-improvement": "#f59e0b",
+                "poor": "#ef4444",
+            }
+            _cols = st.columns(3)
+            for _col, _mid in zip(_cols, ("lcp", "inp", "cls")):
+                _m = _cwv.metrics[_mid]
+                _color = _verdict_color.get(_m.verdict, "#9ca3af")
+                _verdict_txt = (_m.verdict or "not measured").replace("-", " ").title()
+                _field_txt = (
+                    f"{_m.field_percentile:.0f}{_m.unit} ({_m.field_category})"
+                    if _m.field_percentile is not None
+                    else "No real-user data"
+                )
+                _lab_txt = (
+                    f"Lab: {_m.lab_display}"
+                    if _m.lab_display is not None
+                    else "Lab: not measured"
+                )
+                with _col:
+                    st.markdown(
+                        f"""
+                        <div class="metric-container" style="border-top: 3px solid {_color};">
+                            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">{_m.label}</div>
+                            <div style="font-size: 1.6rem; font-weight: 800; color: {_color}; margin: 6px 0;">{_verdict_txt}</div>
+                            <div style="font-size: 0.95rem;">Real-user p75: <strong>{_field_txt}</strong></div>
+                            <div style="font-size: 0.85rem; color: #9ca3af; margin-top: 4px;">{_lab_txt}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+            st.markdown("---")
+            st.markdown("### 🎯 Top opportunities (by time saved)")
+            if not _cwv.opportunities:
+                st.success("No significant opportunities found on this run — the page is already lean.")
+            else:
+                for _opp in _cwv.opportunities:
+                    _save = _opp["savings_ms"] / 1000.0
+                    _disp = f" — {_opp['display']}" if _opp.get("display") else ""
+                    st.markdown(
+                        f"- **{_opp['title']}** — saves ~{_save:.1f}s{_disp}"
+                    )
+            st.caption("The CWV result is included in the PDF and JSON downloads above.")
 
     st.markdown("---")
     st.markdown(

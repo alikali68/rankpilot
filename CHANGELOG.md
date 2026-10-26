@@ -6,6 +6,30 @@ what was added, changed, and fixed — no silent behavior changes.
 
 ---
 
+## [2.2.0] — 2026-10-26 — Module M3: Core Web Vitals + Shareable Report
+
+### Added
+- **Core Web Vitals tab (mobile-first)** — LCP, INP, and CLS from the Google
+  PageSpeed Insights API, each judged separately against Google's thresholds
+  (LCP < 2.5 s, INP < 200 ms, CLS < 0.1). Real-user field data (CrUX p75)
+  is the verdict; Lighthouse lab data is shown as diagnostics. When a URL
+  has no field data yet, the UI says so explicitly instead of substituting
+  lab numbers. Lab INP is often unmeasured — it is shown as "not measured",
+  never invented.
+- `core/cwv.py` — key-free engine module: `fetch_cwv` / `parse_cwv` /
+  `run_cwv` with plain-language errors (bad key, quota, timeout, bad URL).
+  The API key is read from Streamlit secrets (`PAGESPEED_API_KEY`) or a
+  session-only sidebar field; it is never committed. Without a key the tab
+  runs on Google's anonymous quota with a clear notice.
+- **Top 3 opportunities** — Lighthouse opportunities ranked by time saved
+  (only savings above zero are listed).
+- **Shareable report** — the PDF and JSON exports now include the CWV
+  results (field + lab values, verdicts, opportunities) when a CWV run
+  exists for the audited URL, so the downloaded report is client-ready.
+
+### Changed
+- Sidebar caption: Engine v2.2.
+
 ## [2.1.0] — 2026-10-16 — Module M2: Competitor Comparison
 
 ### Added

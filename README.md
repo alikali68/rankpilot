@@ -26,8 +26,9 @@
 | 🎓 Letter grades | A (90+) → F (<60), with per-category sub-scores |
 | 📊 Radar analytics | Plotly polar chart + category distribution table |
 | 🎯 Priority action plan | Fails ranked by weight × severity — fix what moves the needle |
-| 📄 PDF export | One-click client-ready audit report (ReportLab) |
-| 💾 JSON export | Raw structured data for pipelines & SEO teams |
+| ⚡ Core Web Vitals | Real-user LCP / INP / CLS from PageSpeed Insights (mobile-first) + top 3 opportunities — field (CrUX) verdicts, lab diagnostics |
+| 📄 PDF export | One-click client-ready audit report (ReportLab) — now includes Core Web Vitals |
+| 💾 JSON export | Raw structured data for pipelines & SEO teams — now includes Core Web Vitals |
 | 🌙 Premium dark UI | Tabbed Streamlit dashboard, custom CSS |
 | 🐳 Docker-ready | Dockerfile + docker-compose for one-command deploy |
 
@@ -224,10 +225,19 @@ docker compose up -d --build
 One-click deploy on [Streamlit Community Cloud](https://streamlit.io/cloud) —
 connect the repo and set `app.py` as the entry point.
 
+### Core Web Vitals setup (free)
+
+The CWV tab calls the Google PageSpeed Insights API. Create a free key in
+Google Cloud Console (new project → enable PageSpeed Insights API → create
+an API key restricted to that API), then add it to the deployed app as a
+Streamlit secret named `PAGESPEED_API_KEY` (App settings → Secrets).
+Without a key the tab still runs on Google's anonymous quota, with a clear
+notice about the lower limit. The key is never committed to the repo.
+
 ## 🔮 Roadmap
 
 - [x] Sitemap-aware multi-page crawl (Module M1 — shipped)
-- [ ] Core Web Vitals via PageSpeed API (optional key)
+- [x] Core Web Vitals via PageSpeed API (Module M3 — shipped, mobile-first)
 - [ ] Historical tracking — re-audit and diff scores over time
 - [ ] Scheduled audits with email digests
 
