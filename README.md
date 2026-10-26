@@ -1,5 +1,7 @@
 # 🔍 RankPilot
 
+🌐 **Language / زبان:** **English** | [فارسی](README.fa.md)
+
 > Data-driven SEO & technical website auditor. Deterministic scoring engine, concurrent crawler, and real-user Core Web Vitals from Google PageSpeed Insights — pure Python plus one free Google API.
 
 **🚀 Live demo:** https://rankpilot-wvugccwcscig6wdpe2pqiq.streamlit.app/
