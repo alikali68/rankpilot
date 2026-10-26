@@ -1,8 +1,6 @@
 # 🔍 RankPilot
 
-🌐 **Language / زبان:** **English** | [فارسی](README.fa.md)
-
-> Data-driven SEO & technical website auditor. Deterministic scoring engine, concurrent crawler, zero APIs, pure Python.
+> Data-driven SEO & technical website auditor. Deterministic scoring engine, concurrent crawler, and real-user Core Web Vitals from Google PageSpeed Insights — pure Python plus one free Google API.
 
 **🚀 Live demo:** https://rankpilot-wvugccwcscig6wdpe2pqiq.streamlit.app/
 
@@ -20,17 +18,51 @@
 |---------|---------|
 | 🔍 7-category audit | Meta, headings, images, links, performance, security, content — 25 checks |
 | 🌐 Multi-page site audit | Sitemap-driven crawl — aggregate score, category averages, weakest pages |
+| 🆚 Competitor comparison | Same pipeline, both sites — score/category deltas, ranked opportunities |
+| ⚡ Core Web Vitals | Real-user LCP / INP / CLS from PageSpeed Insights (mobile-first) — field verdicts, lab diagnostics, top 3 opportunities |
 | 💯 Deterministic scoring | 0–100 with transparent weights — no black boxes |
 | ⚡ Concurrent crawler | `ThreadPoolExecutor` — link & image probes run in parallel |
 | 📱 Device profiles | Desktop Chrome 128 · Mobile iPhone Safari · Googlebot |
 | 🎓 Letter grades | A (90+) → F (<60), with per-category sub-scores |
 | 📊 Radar analytics | Plotly polar chart + category distribution table |
 | 🎯 Priority action plan | Fails ranked by weight × severity — fix what moves the needle |
-| ⚡ Core Web Vitals | Real-user LCP / INP / CLS from PageSpeed Insights (mobile-first) + top 3 opportunities — field (CrUX) verdicts, lab diagnostics |
 | 📄 PDF export | One-click client-ready audit report (ReportLab) — now includes Core Web Vitals |
 | 💾 JSON export | Raw structured data for pipelines & SEO teams — now includes Core Web Vitals |
 | 🌙 Premium dark UI | Tabbed Streamlit dashboard, custom CSS |
 | 🐳 Docker-ready | Dockerfile + docker-compose for one-command deploy |
+
+---
+
+## 🚀 Run it
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+# open http://localhost:8501
+```
+
+Or with Docker:
+
+```bash
+docker compose up -d --build
+# open http://localhost:8501
+```
+
+### ☁️ Cloud deploy
+
+One-click deploy on [Streamlit Community Cloud](https://streamlit.io/cloud) —
+connect the repo and set `app.py` as the entry point.
+
+### ⚡ Core Web Vitals setup (free)
+
+The CWV tab calls the Google PageSpeed Insights API. Create a free key in
+Google Cloud Console (new project → enable the PageSpeed Insights API →
+create an API key restricted to that API), then add it to the deployed app as
+a Streamlit secret named `PAGESPEED_API_KEY` (App settings → Secrets), or
+paste it in the sidebar field for one session. Without a key the tab still
+runs on Google's anonymous quota, with a clear notice about the lower limit.
+The key is never committed to the repo, and billing is never enabled — the
+API is free within quota, so no charge is possible.
 
 ---
 
@@ -43,18 +75,19 @@ RankPilot doesn't guess — it *measures*. Every audit runs the same determinist
 ```mermaid
 flowchart LR
     A[🌐 Target URL] --> B[📡 Session fetch]
-    B --> C[🔬 DOM parse]
+    B --> C[🔍 DOM parse]
     C --> D[🧪 7 audit suites]
     D --> E[⚡ Concurrent probes]
     E --> F[⚖️ Weighted scoring]
     F --> G[🎯 Priority ranking]
     G --> H[📊 Dashboard · 📄 PDF · 💾 JSON]
+    I[⚡ Core Web Vitals] --> H
 ```
 
 ### 1. 📡 Session-based fetching
 A persistent `requests.Session` (connection pooling, real desktop User-Agent) fetches the target with a 10-second timeout. Typed error handling distinguishes SSL failures, timeouts, and DNS errors — each surfaces as a clear message, never a traceback. Non-HTML responses are rejected *before* parsing, so a PDF link never produces a garbage audit.
 
-### 2. 🔬 Single-parse DOM
+### 2. 🔍 Single-parse DOM
 BeautifulSoup + `lxml` builds the document tree **once**. All seven audit suites read from that same tree — no re-fetching, no re-parsing, no wasted work.
 
 ### 3. 🧪 The seven audit suites — 25 checks
@@ -93,7 +126,9 @@ rankpilot/
 │   ├── __init__.py
 │   ├── models.py       → AuditCheck / AuditReport / SiteAuditReport dataclasses
 │   ├── engine.py       → RankPilotEngine: fetch, audit, scoring, site crawl
-│   └── sitemap.py      → deterministic /sitemap.xml discovery
+│   ├── sitemap.py      → deterministic /sitemap.xml discovery
+│   ├── compare.py      → competitor comparison engine (M2)
+│   └── cwv.py          → Core Web Vitals via PageSpeed Insights API (M3)
 ├── requirements.txt
 ├── Dockerfile
 └── docker-compose.yml
@@ -101,6 +136,7 @@ rankpilot/
 
 ```python
 from core.engine import RankPilotEngine
+from core.cwv import run_cwv
 
 # Single page
 report = RankPilotEngine().inspect_url("https://example.com")
@@ -109,9 +145,13 @@ print(report.total_score, report.letter_grade)   # 70.5 C
 # Full site — crawls up to 25 pages via /sitemap.xml
 site = RankPilotEngine().audit_site("https://example.com", max_pages=25)
 print(site.avg_score, site.grade, site.page_count)
+
+# Core Web Vitals (mobile-first) — needs a free PageSpeed API key
+cwv = run_cwv("https://example.com", api_key="YOUR_KEY")
+print(cwv.metrics["lcp"].verdict, cwv.metrics["cls"].field_percentile)
 ```
 
-**Data flow:** `URL → RankPilotEngine.inspect_url() → AuditReport → dashboard / PDF / JSON`.
+**Data flow:** `URL → RankPilotEngine.inspect_url() → AuditReport → dashboard / PDF / JSON`, and `URL → run_cwv() → CWVResult → CWV tab / PDF / JSON`.
 The `AuditReport` dataclass is the single source of truth — the dashboard, the PDF generator, and the JSON exporter all derive from it.
 
 ---
@@ -167,6 +207,43 @@ A capped two-page executive PDF: score summary, category deltas, and the ranked 
 
 ---
 
+## ⚡ Module M3 — Core Web Vitals: the science
+
+The 25-check audit measures what a page *contains*. Core Web Vitals measure what a visitor *experiences* — and they are ranking signals Google uses directly. Module M3 adds them through the Google PageSpeed Insights API, mobile-first, because Google ranks by the mobile experience.
+
+### 1. 📏 The three metrics — each judged on its own
+There is no combined CWV score. Each metric is judged separately against Google's thresholds:
+
+| Metric | What it measures | Good | Needs improvement | Poor |
+|--------|------------------|------|-------------------|------|
+| **LCP** — Largest Contentful Paint | How fast the main content appears | ≤ 2.5 s | ≤ 4.0 s | > 4.0 s |
+| **INP** — Interaction to Next Paint | How fast the page reacts to a click/tap | ≤ 200 ms | ≤ 500 ms | > 500 ms |
+| **CLS** — Cumulative Layout Shift | How much the page jumps while loading | ≤ 0.1 | ≤ 0.25 | > 0.25 |
+
+### 2. 👥 Field data is the verdict, lab data is the diagnosis
+Every metric is reported twice:
+
+- **Field (real users)** — the Chrome UX Report (CrUX) 75th percentile from real Chrome visits. This is the verdict Google uses, and it is what the UI shows first. Field data exists only for URLs with enough real-user traffic.
+- **Lab (Lighthouse)** — a single controlled measurement run by Google's servers for this audit. Useful for diagnosis, never a substitute for the field verdict.
+
+Honesty rules, enforced in code: when a URL has no field data yet, the UI says "not enough real-user data" and shows lab values only — it never substitutes lab numbers for the field verdict. When Lighthouse does not measure a metric in a run (INP is commonly absent from lab runs), it is shown as "not measured" — never invented, never zero-filled.
+
+### 3. 🎯 Top opportunities
+Lighthouse opportunities are ranked by time saved and the top 3 are shown — only ones with savings above zero. A page with no significant opportunities says so plainly.
+
+### 4. 🔑 Key, quota, and failure behavior (`core/cwv.py`)
+- The API key is read from Streamlit secrets (`PAGESPEED_API_KEY`) or a session-only sidebar field. It is never written to code, logs, or the repo.
+- Without a key the tab still runs on Google's anonymous quota, with a clear notice about the lower limit.
+- Every failure surfaces as a plain-language message — bad key, quota reached, timeout, unreachable URL — never a traceback. A CWV run takes about 10–30 seconds and runs only on demand; it never slows down the base audit.
+- Only the audited URL is measured — never the whole site in one call.
+
+### 5. 📄 Shareable report
+When a CWV run exists for the audited URL, the PDF and JSON exports include it — field and lab values, verdicts, and opportunities — so the downloaded report is the complete, client-ready audit: content, performance, and real-user experience in one document.
+
+**Data flow:** `URL → run_cwv() → CWVResult → CWV tab / PDF / JSON`. The `CWVResult` dataclass is the single source of truth for the tab and both exporters.
+
+---
+
 ## 🕰️ Project evolution — from first audit to competitive intelligence
 
 RankPilot was built incrementally, one verified module at a time. Every stage kept the same contract: **deterministic scoring, no silent behavior changes, no black boxes.**
@@ -177,7 +254,9 @@ RankPilot was built incrementally, one verified module at a time. Every stage ke
 
 **v2.0 — Module M1: full-site audits (Oct 13).** One page tells you how a URL performs; a *site* score tells you where the property bleeds. Added deterministic sitemap discovery (index files followed recursively, same-domain filtering, capped pages), polite concurrent crawling (5 workers, staggered dispatch), and transparent aggregation — mean, median, category averages, weakest-5 pages — on the identical A–F scale. Failed pages record zeros instead of aborting the run.
 
-**v2.1 — Module M2: competitor comparison (Oct 16).** The current release. Two sites audited through the identical pipeline, normalized per-check to 0–100, with score/category deltas, win/lose/tie verdicts, and a ranked opportunity list — the smallest set of fixes that closes the competitive gap fastest. Failed pages count as zero everywhere, so deltas can never flatter.
+**v2.1 — Module M2: competitor comparison (Oct 16).** Two sites audited through the identical pipeline, normalized per-check to 0–100, with score/category deltas, win/lose/tie verdicts, and a ranked opportunity list — the smallest set of fixes that closes the competitive gap fastest. Failed pages count as zero everywhere, so deltas can never flatter.
+
+**v2.2 — Module M3: Core Web Vitals (Oct 26).** The current release. Real-user LCP / INP / CLS from the PageSpeed Insights API, mobile-first, each judged against Google's thresholds with field data as the verdict and lab data as the diagnosis — plus the top 3 time-saving opportunities. The PDF and JSON exports now carry CWV, making the downloaded report the complete client-ready audit. The key is free, lives in Streamlit secrets, and is never committed.
 
 Full version-by-version detail lives in [CHANGELOG.md](CHANGELOG.md).
 
@@ -191,6 +270,7 @@ Full version-by-version detail lives in [CHANGELOG.md](CHANGELOG.md).
 | `ThreadPoolExecutor` (5 workers) | Image weight probes run concurrently |
 | Session reuse | One `requests.Session` per audit — connection pooling |
 | Bounded sampling | ≤15 links, ≤10 images, 10s fetch timeout |
+| On-demand CWV | One PageSpeed call per CWV run (~10–30 s), never blocks the base audit |
 
 Typical full audit: **seconds, not minutes**.
 
@@ -204,39 +284,13 @@ Typical full audit: **seconds, not minutes**.
 - **BeautifulSoup4 + lxml** — HTML parsing
 - **Plotly** — radar-chart analytics
 - **ReportLab** — PDF report generation
+- **Google PageSpeed Insights API** — Core Web Vitals (free key, M3)
 - **Docker** — containerized deployment
-
-## 🚀 Run it
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-Or with Docker:
-
-```bash
-docker compose up -d --build
-# open http://localhost:8501
-```
-
-## ☁️ Cloud deploy
-
-One-click deploy on [Streamlit Community Cloud](https://streamlit.io/cloud) —
-connect the repo and set `app.py` as the entry point.
-
-### Core Web Vitals setup (free)
-
-The CWV tab calls the Google PageSpeed Insights API. Create a free key in
-Google Cloud Console (new project → enable PageSpeed Insights API → create
-an API key restricted to that API), then add it to the deployed app as a
-Streamlit secret named `PAGESPEED_API_KEY` (App settings → Secrets).
-Without a key the tab still runs on Google's anonymous quota, with a clear
-notice about the lower limit. The key is never committed to the repo.
 
 ## 🔮 Roadmap
 
 - [x] Sitemap-aware multi-page crawl (Module M1 — shipped)
+- [x] Competitor comparison (Module M2 — shipped)
 - [x] Core Web Vitals via PageSpeed API (Module M3 — shipped, mobile-first)
 - [ ] Historical tracking — re-audit and diff scores over time
 - [ ] Scheduled audits with email digests
